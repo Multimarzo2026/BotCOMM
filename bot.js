@@ -76,7 +76,13 @@ client.on('ready', () => {
 const configPath = path.join(__dirname, 'config.json');
 function getConfig() {
     if (!fs.existsSync(configPath)) {
-        fs.writeFileSync(configPath, JSON.stringify({ admins: [], logGroupId: "" }, null, 2));
+        fs.writeFileSync(configPath, JSON.stringify({ 
+            admins: [], 
+            logGroupId: "",
+            mainGroupId: "",
+            davidFalsoId: "",
+            davidFalsoCooldownSec: 20 // 👈 Nueva variable configurable en segundos
+        }, null, 2));
     }
     return JSON.parse(fs.readFileSync(configPath, 'utf8'));
 }
@@ -163,18 +169,77 @@ function parseUserMessage(text) {
     return result;
 }
 
+// ===== VARIABLES DE ESTADO =====
+// Ahora es un objeto que guardará el tiempo por cada ID de usuario
+const userCooldowns = {}; 
+
 client.on('message_create', async (msg) => {
     const text = msg.body.trim();
     const PREFIX = "`[ Multimarzo ]` "; 
+    const config = getConfig();
 
+    // Extraemos el ID del remitente al principio para poder usarlo en los cooldowns
+    const senderId = msg.author || msg.from;
     const chat = await msg.getChat();
+    
     if (chat.isGroup) {
-        const senderId = msg.author || msg.from;
         console.log(`━━━━━━━━━━━━━━━━━━━━ [ ESPÍA SYSTEM ] ━━━━━━━━━━━━━━━━━━━━ Grupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
     }
 
     if (!text.startsWith('/')) return;
 
+    // --- COMANDO EASTER EGG (Público con Cooldown Silencioso INDIVIDUAL) ---
+    if (text === '/davidFalso') {
+        const now = Date.now();
+        
+        // Leemos la configuración (usamos 20 como salvavidas si la clave no existe)
+        const cooldownSec = config.davidFalsoCooldownSec !== undefined ? config.davidFalsoCooldownSec : 20;
+        const cooldownTime = cooldownSec * 1000;
+
+        // 1. COMPROBACIÓN DEL TIMEOUT INDIVIDUAL (Drop Silencioso)
+        const lastUserTime = userCooldowns[senderId] || 0;
+        if (now - lastUserTime < cooldownTime) {
+            return; // 🛑 Ignoramos el mensaje si ESTE usuario aún está en tiempo de espera
+        }
+
+        try {
+            if (!config.mainGroupId || !config.davidFalsoId) {
+                await msg.reply("⚠️ Faltan configurar 'mainGroupId' o 'davidFalsoId' en el sistema.");
+                return;
+            }
+            
+            const mainChat = await client.getChatById(config.mainGroupId);
+            const messages = await mainChat.fetchMessages({ limit: 500 });
+            
+            const davidMessages = messages.filter(m => 
+                m.author === config.davidFalsoId && 
+                m.body && 
+                m.body.trim().length > 0 && 
+                !m.hasMedia
+            );
+            
+            if (davidMessages.length > 0) {
+                const randomMsg = davidMessages[Math.floor(Math.random() * davidMessages.length)];
+                await msg.reply(`📦 *Abriendo MM-Box...*\n✨ ¡Ha tocado sabiduría de David Falso!\n\n_"${randomMsg.body}"_`);
+                
+                // 2. ACTUALIZAMOS EL TIEMPO SOLO PARA ESTE USUARIO
+                userCooldowns[senderId] = Date.now();
+            } else {
+                await msg.reply("😔 No he encontrado frases recientes de David Falso en mi memoria caché.");
+            }
+        } catch (e) {
+            console.error("Error en easter egg:", e);
+        }
+        return;
+    }
+
+    // --- FILTRO DE ADMINISTRADORES ---
+    const admins = config.admins || [];
+    if (!admins.includes(senderId)) {
+        return; 
+    }
+
+    // --- COMANDOS PRIVADOS (Solo Admins) ---
     if (text === '/getgroupid') {
         await msg.reply(`El ID de este chat es:\n${msg.from}`);
         return;
@@ -187,7 +252,7 @@ client.on('message_create', async (msg) => {
         `🔹 */ping* : Comprueba si el bot está en línea y responde.\n` +
         `🔹 */getgroupid* : Devuelve el ID interno del chat actual.\n\n` +
         `🎧 *REGISTRO DE ESCUCHAS:*\n` +
-        `Enviad las escuchas al grupo. El bot procesará al reaccionar con ☑️ o ✅.\n\n` +
+        `Enviad las escuchas al grupo principal. El bot procesará al reaccionar con ☑️ o ✅.\n\n` +
         `*Obligatorio:*\n` +
         `🔗 Enlace Spotify/YouTube.\n` +
         `⭐ Nota X/10.\n` +
@@ -212,7 +277,6 @@ async function fetchDiscMetadata(url, uniqueId) {
         const m1 = text.match(/Released on:\s*(\d{4})/i);
         const m2 = text.match(/Release date:\s*(\d{4})/i);
         const m3 = text.match(/[℗©]\s*(\d{4})/i); 
-        
         if (m1) return parseInt(m1[1]);
         if (m2) return parseInt(m2[1]);
         if (m3) return parseInt(m3[1]);
@@ -275,17 +339,29 @@ async function fetchDiscMetadata(url, uniqueId) {
             
             try {
                 const publicUrl = isPlaylist ? `https://music.youtube.com/playlist?list=${ytId}` : `https://music.youtube.com/watch?v=${ytId}`;
+                
                 const webRes = await fetch(publicUrl, {
-                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+                    headers: { 
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+                        'Cookie': 'CONSENT=YES+cb.20230101-11-p0.es+FX+308; SOCS=CAI;' 
+                    }
                 });
                 
                 if (webRes.ok) {
                     const htmlText = await webRes.text();
                     
-                    const coverRegex = /(https:\/\/(?:yt3|lh3)\.googleusercontent\.com\/[a-zA-Z0-9_\-]+)/;
-                    const match = htmlText.match(coverRegex);
-                    if (match && match[1]) {
-                        permanentCoverUrl = match[1] + '=w544-h544-l90-rj';
+                    const perenneRegex = /(?:https?:)?[\\\/]+(?:[a-zA-Z0-9-]+\.)?googleusercontent\.com[\\\/]+profile[\\\/]+picture[\\\/]+\d+/i;
+                    const perenneMatch = htmlText.match(perenneRegex);
+                    
+                    if (perenneMatch) {
+                        permanentCoverUrl = perenneMatch[0].replace(/\\/g, '');
+                        if (permanentCoverUrl.startsWith('//')) permanentCoverUrl = 'https:' + permanentCoverUrl;
+                    } else {
+                        const ogImageMatch = htmlText.match(/<meta\s+(?:property|name)=["'](?:og|twitter):image["']\s+content=["']([^"']+)["']/i);
+                        if (ogImageMatch && ogImageMatch[1] && !ogImageMatch[1].includes('ytimg.com')) {
+                            permanentCoverUrl = ogImageMatch[1];
+                        }
                     }
 
                     const yearRegex = /"musicAlbumReleaseContext":\{"releaseDate":\{"year":(\d{4})/i;
@@ -294,13 +370,17 @@ async function fetchDiscMetadata(url, uniqueId) {
                         webScrapedYear = parseInt(yearMatch[1]);
                     }
 
-                    // 1. INTENTO DE EXTRACCIÓN DE LA INTERFAZ EXACTA
                     try {
                         const scriptMatch = htmlText.match(/ytInitialData\s*=\s*(\{[\s\S]+?\});\s*<\/script>/);
                         if (scriptMatch) {
                             const data = JSON.parse(scriptMatch[1]);
                             const tabContent = data?.contents?.twoColumnBrowseResultsRenderer?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents?.[0];
                             const header = tabContent?.musicResponsiveHeaderRenderer || tabContent?.musicDetailHeaderRenderer;
+                            
+                            if (!permanentCoverUrl && header?.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails?.length > 0) {
+                                const thumbs = header.thumbnail.musicThumbnailRenderer.thumbnail.thumbnails;
+                                permanentCoverUrl = thumbs[thumbs.length - 1].url;
+                            }
                             
                             if (header?.subtitle?.runs?.length > 0) {
                                 for (const run of header.subtitle.runs) {
@@ -318,19 +398,8 @@ async function fetchDiscMetadata(url, uniqueId) {
                                 }
                             }
                         }
-                    } catch (jsonErr) {
-                        // Plan B si el JSON explota: Regex directo al código HTML
-                        const uiTypeRegex = /"subtitle"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"(Album|EP|Single|Sencillo)"/i;
-                        const uiMatch = htmlText.match(uiTypeRegex);
-                        if (uiMatch) {
-                            const t = uiMatch[1].toLowerCase();
-                            if (t === 'single' || t === 'sencillo') webScrapedType = 'Sencillo';
-                            else if (t === 'ep') webScrapedType = 'EP';
-                            else if (t === 'album' || t === 'álbum') webScrapedType = 'Álbum';
-                        }
-                    }
+                    } catch (jsonErr) {}
 
-                    // 2. EXTRACCIÓN DEL SISTEMA INTERNO DE YOUTUBE (Frecuentemente miente, lo usamos de backup)
                     const releaseTypeRegex = /"musicAlbumReleaseType":\s*"MUSIC_ALBUM_RELEASE_TYPE_([A-Z]+)"/i;
                     const typeMatch = htmlText.match(releaseTypeRegex);
                     if (typeMatch) {
@@ -340,9 +409,7 @@ async function fetchDiscMetadata(url, uniqueId) {
                         else if (t === 'album') systemScrapedType = "Álbum";
                     }
                 }
-            } catch (e) {
-                console.error("❌ Error extrayendo info estática de YT:", e);
-            }
+            } catch (e) {}
 
             if (isPlaylist) {
                 const ytRes = await fetch(`https://www.googleapis.com/youtube/v3/playlists?part=snippet,contentDetails&id=${ytId}&key=${apiKey}`);
@@ -357,7 +424,6 @@ async function fetchDiscMetadata(url, uniqueId) {
                 let type = "Álbum";
                 let title = rawTitle;
 
-                // --- TRIBUNAL DEL TIPO DE DISCO ---
                 const prefixRegex = /^(Álbum|Album|EP|Single|Sencillo)\s*[-–—•]\s*/i;
                 const suffixRegex = /\s*[-–—•]\s*(Álbum|Album|EP|Single|Sencillo)$/i;
 
@@ -375,20 +441,13 @@ async function fetchDiscMetadata(url, uniqueId) {
                     else if (t === 'ep') titleScrapedType = 'EP';
                 }
 
-                // 1. Manda la Interfaz (Si logramos leerla limpia)
                 if (webScrapedType) {
                     type = webScrapedType;
-                } 
-                // 2. Manda el Título (Si la interfaz falló, el " - EP" del título es indiscutible)
-                else if (titleScrapedType) {
+                } else if (titleScrapedType) {
                     type = titleScrapedType;
-                } 
-                // 3. Manda el Sistema de YT (Pero ignoramos si dice "Álbum" porque suele ser falso)
-                else if (systemScrapedType && systemScrapedType !== "Álbum") {
+                } else if (systemScrapedType && systemScrapedType !== "Álbum") {
                     type = systemScrapedType;
-                } 
-                // 4. Manda la Matemática
-                else {
+                } else {
                     if (trackCount === 1) type = "Sencillo";
                     else if (trackCount > 1 && trackCount <= 5) type = "EP";
                     else type = "Álbum";
@@ -402,8 +461,8 @@ async function fetchDiscMetadata(url, uniqueId) {
                 }
                 
                 let year = null; 
-                
                 let coverUrl = permanentCoverUrl;
+                
                 if (!coverUrl) {
                     const thumbs = item.snippet.thumbnails || {};
                     const bestThumb = thumbs.maxres || thumbs.standard || thumbs.high || thumbs.medium || thumbs.default;
@@ -471,16 +530,13 @@ async function fetchDiscMetadata(url, uniqueId) {
                         year = parseInt(item.snippet.publishedAt.substring(0, 4)); 
                     }
 
-                } catch (err) {
-                    console.error("❌ Error calculando duración masiva de la playlist YT:", err);
-                }
+                } catch (err) {}
                 
                 const totalMinutes = Math.floor(totalSeconds / 60);
 
                 return { title, artist, year, type, trackCount, coverUrl, duration_minutes: totalMinutes, source: 'YouTube Music' };
             
             } else {
-                // Vídeos sueltos (music.youtube.com/watch...)
                 const ytRes = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&id=${ytId}&key=${apiKey}`);
                 if (!ytRes.ok) return null;
                 const ytData = await ytRes.json();
@@ -533,7 +589,6 @@ async function fetchDiscMetadata(url, uniqueId) {
             }
         }
     } catch (e) {
-        console.error("❌ Error interno en fetchDiscMetadata:", e);
         return null;
     }
     return null;
@@ -542,10 +597,17 @@ async function fetchDiscMetadata(url, uniqueId) {
 // ===== REACTION HANDLER (El motor principal) =====
 client.on('message_reaction', async (reaction) => {
     
+    const config = getConfig();
+    const mainGroupId = config.mainGroupId;
+
+    // 1. FILTRO DE GRUPO: Ignorar si la reacción ocurre fuera del grupo de escuchas
+    if (mainGroupId && reaction.msgId.remote !== mainGroupId) {
+        return; 
+    }
+    
     const cleanEmoji = reaction.reaction.replace(/[\uFE0F\u200D]/g, '');
     if (cleanEmoji !== '☑' && cleanEmoji !== '✅') return;
 
-    const config = getConfig();
     const admins = config.admins || [];
     
     if (!admins.includes(reaction.senderId)) return;
@@ -637,6 +699,7 @@ client.on('message_reaction', async (reaction) => {
         const rawDiscs = await base44.entities.Disc.list();
         const allDiscs = Array.isArray(rawDiscs) ? rawDiscs : (rawDiscs.data || rawDiscs.items || rawDiscs.records || []);
         
+        // 1. PRIMERA COMPROBACIÓN: Por URL exacta (ID único)
         let existingDisc = allDiscs.find(disc => {
             if (!disc.link) return false;
             return getUniqueId(disc.link) === userUniqueId;
@@ -655,17 +718,19 @@ client.on('message_reaction', async (reaction) => {
                 return;
             }
 
+            // 2. SEGUNDA COMPROBACIÓN: Por Título y Artista (Magia Unicode anti-duplicados)
             existingDisc = allDiscs.find(disc => {
                 if (!disc.title || !disc.artist) return false;
                 
                 const normalize = (str) => str.toLowerCase()
                     .replace(/\s*-\s*topic\s*$/i, '') 
-                    .replace(/[^\w\s]/gi, '')         
+                    .replace(/[^\p{L}\p{N}\s]/gu, '') // Mantiene letras de cualquier idioma (Japonés, Ruso, etc) y números
                     .replace(/\s+/g, '');             
                 
                 const dbTitle = normalize(disc.title);
                 const newTitle = normalize(metadata.title);
                 
+                if (!dbTitle || !newTitle) return false; // Blindaje contra strings vacíos
                 if (dbTitle !== newTitle) return false;
                 
                 const dbArtist = normalize(disc.artist);
@@ -742,7 +807,7 @@ client.on('message_reaction', async (reaction) => {
         const createdListen = await base44.entities.Listen.create(listenPayload);
 
         // --- SISTEMA DE CRÉDITOS ---
-        let creditAwarded = false;
+        let creditAwarded = 0; // Ahora guardará la cantidad dinámica en lugar de un booleano
         let newCreditsBalance = 0;
 
         // Comprobamos que no sea S/E y que hayamos podido obtener los datos del participante
@@ -763,26 +828,44 @@ client.on('message_reaction', async (reaction) => {
             }
 
             if (isAlive) {
-                newCreditsBalance = (participantRecord.credits || 0) + 1;
+                // FETCH DINÁMICO DE CRÉDITOS DESDE AppConfig
+                let creditsToAward = 1; // Valor por defecto (salvavidas)
                 
-                // Actualizamos el saldo en el perfil del participante
-                await base44.entities.Participant.update(participantId, {
-                    credits: newCreditsBalance
-                });
+                try {
+                    const rawConfigs = await base44.entities.AppConfig.list();
+                    const allConfigs = Array.isArray(rawConfigs) ? rawConfigs : (rawConfigs.data || rawConfigs.items || rawConfigs.records || []);
+                    
+                    const creditConfig = allConfigs.find(c => c.key === 'credits_per_listen');
+                    if (creditConfig && typeof creditConfig.value === 'number') {
+                        creditsToAward = creditConfig.value;
+                    }
+                } catch (e) {
+                    console.error("⚠️ No se pudo obtener 'credits_per_listen' de AppConfig. Usando 1 por defecto.", e);
+                }
 
-                // Dejamos la huella en el registro de transacciones
-                await base44.entities.CreditTransaction.create({
-                    participant_id: participantId,
-                    amount: 1,
-                    balance_after: newCreditsBalance,
-                    type: "listen_reward",
-                    description: `Recompensa por escucha #${listenOrder} (Edición ${editionYear})`,
-                    related_listen_id: createdListen.id,
-                    related_disc_id: discId,
-                    transaction_date: messageDate.toISOString()
-                });
+                // Si la recompensa es mayor a 0, procedemos con la transacción
+                if (creditsToAward > 0) {
+                    newCreditsBalance = (participantRecord.credits || 0) + creditsToAward;
+                    
+                    // Actualizamos el saldo en el perfil del participante
+                    await base44.entities.Participant.update(participantId, {
+                        credits: newCreditsBalance
+                    });
 
-                creditAwarded = true;
+                    // Dejamos la huella en el registro de transacciones
+                    await base44.entities.CreditTransaction.create({
+                        participant_id: participantId,
+                        amount: creditsToAward,
+                        balance_after: newCreditsBalance,
+                        type: "listen_reward",
+                        description: `Recompensa por escucha #${listenOrder} (Edición ${editionYear})`,
+                        related_listen_id: createdListen.id,
+                        related_disc_id: discId,
+                        transaction_date: messageDate.toISOString()
+                    });
+
+                    creditAwarded = creditsToAward;
+                }
             }
         }
 
