@@ -177,19 +177,24 @@ const userCooldowns = {};
 client.on('message_create', async (msg) => {
     const config = getConfig();
 
-    // 🛑 FILTRO DE AISLAMIENTO ABSOLUTO: El bot ignora cualquier mensaje fuera de los grupos autorizados
-    if (msg.from !== config.mainGroupId && msg.from !== config.logGroupId) {
-        return; 
+    // 🛑 FILTRO DE AISLAMIENTO ABSOLUTO (Corregido)
+    // Comprobamos 'msg.from' (entrantes) y 'msg.to' (salientes, por si el bot y tú usáis el mismo número)
+    const isMainGroup = msg.from === config.mainGroupId || msg.to === config.mainGroupId;
+    const isLogGroup = msg.from === config.logGroupId || msg.to === config.logGroupId;
+
+    if (!isMainGroup && !isLogGroup) {
+        return; // Drop silencioso absoluto si no es en BotCOMM o Logs
     }
 
     const text = msg.body.trim();
     const PREFIX = "`[ Multimarzo ]` "; 
-    const senderId = msg.author || msg.from;
+    
+    // Obtenemos el ID real del usuario
+    const senderId = msg.author || msg.from; 
     const chat = await msg.getChat();
     
     // --- ESPÍA SYSTEM RESTRINGIDO ---
     if (chat.isGroup) {
-        const isMainGroup = msg.from === config.mainGroupId;
         const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
         console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
     }
