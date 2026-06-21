@@ -2,6 +2,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process'); // 👈 NUEVO: Necesario para leer Git
 
 // ===== INICIALIZACIÓN BASE44 =====
 let base44;
@@ -81,7 +82,8 @@ function getConfig() {
             logGroupId: "",
             mainGroupId: "",
             davidFalsoId: "",
-            davidFalsoCooldownSec: 20 // 👈 Nueva variable configurable en segundos
+            davidFalsoCooldownSec: 20,
+            botVersion: "1.0.0" // 👈 NUEVO: Plan B si Git no está disponible
         }, null, 2));
     }
     return JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -180,10 +182,18 @@ client.on('message_create', async (msg) => {
 
     // Extraemos el ID del remitente al principio para poder usarlo en los cooldowns
     const senderId = msg.author || msg.from;
-    const chat = await msg.getChat();
     
+    // --- ESPÍA SYSTEM RESTRINGIDO ---
+    const chat = await msg.getChat();
     if (chat.isGroup) {
-        console.log(`━━━━━━━━━━━━━━━━━━━━ [ ESPÍA SYSTEM ] ━━━━━━━━━━━━━━━━━━━━ Grupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
+        const isMainGroup = msg.from === config.mainGroupId;
+        const isLogGroup = msg.from === config.logGroupId;
+        
+        // Solo registramos si el mensaje proviene de uno de nuestros dos grupos clave
+        if (isMainGroup || isLogGroup) {
+            const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
+            console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
+        }
     }
 
     if (!text.startsWith('/')) return;
@@ -240,17 +250,14 @@ client.on('message_create', async (msg) => {
     }
 
     // --- COMANDOS PRIVADOS (Solo Admins) ---
-    if (text === '/getgroupid') {
-        await msg.reply(`El ID de este chat es:\n${msg.from}`);
-        return;
-    }
-
+    
     if (text === '/info') {
         const infoMsg = `ℹ️ *SISTEMA MULTIMARZO - GUÍA DE USO*\n\n` +
         `🛠️ *COMANDOS DE UTILIDAD:*\n` +
         `🔹 */info* : Muestra este panel de ayuda.\n` +
         `🔹 */ping* : Comprueba si el bot está en línea y responde.\n` +
-        `🔹 */getgroupid* : Devuelve el ID interno del chat actual.\n\n` +
+        `🔹 */version* : Muestra la fecha del último parche aplicado.\n` +
+        `🔹 */davidFalso* : (Público) Abre una caja sorpresa con sabiduría de David Falso.\n\n` +
         `🎧 *REGISTRO DE ESCUCHAS:*\n` +
         `Enviad las escuchas al grupo principal. El bot procesará al reaccionar con ☑️ o ✅.\n\n` +
         `*Obligatorio:*\n` +
@@ -265,6 +272,21 @@ client.on('message_create', async (msg) => {
 
     if (text === '/ping') {
         await msg.reply(`${PREFIX}pong`);
+    }
+
+    if (text === '/version') {
+        try {
+            // Ejecutamos el comando de git localmente para sacar fecha y hash
+            const gitDate = execSync('git log -1 --format="%cd" --date=format:"%d/%m/%Y %H:%M:%S"').toString().trim();
+            const gitHash = execSync('git log -1 --format="%h"').toString().trim();
+            
+            await msg.reply(`🤖 *BotCOMM - Estado del Sistema*\n\n🔄 *Última actualización:*\n📅 ${gitDate}\n🏷️ Commit: \`${gitHash}\``);
+        } catch (e) {
+            // Plan B: Si falla Git (ej: no está instalado o se borró la carpeta .git)
+            const versionFallback = config.botVersion || "Desconocida";
+            await msg.reply(`🤖 *BotCOMM - Estado del Sistema*\n\n🏷️ Versión (Config): \`${versionFallback}\`\n_(No se pudo contactar con el motor de Git)_`);
+        }
+        return;
     }
 });
 
@@ -902,8 +924,8 @@ client.on('message_reaction', async (reaction) => {
                          `⭐ \`${parsedData.rating}/10\``;
 
         // Añadimos un pequeño indicador visual al log si se han ganado créditos
-        if (creditAwarded) {
-            finalLog += `\n\n> 🪙 +1 cr. (Total: ${newCreditsBalance})`;
+        if (creditAwarded > 0) {
+            finalLog += `\n\n> 🪙 +${creditAwarded} cr. (Total: ${newCreditsBalance})`;
         }
 
         await updateLog(finalLog, true);
