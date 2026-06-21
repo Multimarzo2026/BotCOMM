@@ -172,28 +172,26 @@ function parseUserMessage(text) {
 }
 
 // ===== VARIABLES DE ESTADO =====
-// Ahora es un objeto que guardará el tiempo por cada ID de usuario
 const userCooldowns = {}; 
 
 client.on('message_create', async (msg) => {
-    const text = msg.body.trim();
-    const PREFIX = "`[ Multimarzo ]` "; 
     const config = getConfig();
 
-    // Extraemos el ID del remitente al principio para poder usarlo en los cooldowns
+    // 🛑 FILTRO DE AISLAMIENTO ABSOLUTO: El bot ignora cualquier mensaje fuera de los grupos autorizados
+    if (msg.from !== config.mainGroupId && msg.from !== config.logGroupId) {
+        return; 
+    }
+
+    const text = msg.body.trim();
+    const PREFIX = "`[ Multimarzo ]` "; 
     const senderId = msg.author || msg.from;
+    const chat = await msg.getChat();
     
     // --- ESPÍA SYSTEM RESTRINGIDO ---
-    const chat = await msg.getChat();
     if (chat.isGroup) {
         const isMainGroup = msg.from === config.mainGroupId;
-        const isLogGroup = msg.from === config.logGroupId;
-        
-        // Solo registramos si el mensaje proviene de uno de nuestros dos grupos clave
-        if (isMainGroup || isLogGroup) {
-            const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
-            console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
-        }
+        const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
+        console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
     }
 
     if (!text.startsWith('/')) return;
@@ -202,14 +200,13 @@ client.on('message_create', async (msg) => {
     if (text === '/davidFalso') {
         const now = Date.now();
         
-        // Leemos la configuración (usamos 20 como salvavidas si la clave no existe)
         const cooldownSec = config.davidFalsoCooldownSec !== undefined ? config.davidFalsoCooldownSec : 20;
         const cooldownTime = cooldownSec * 1000;
 
-        // 1. COMPROBACIÓN DEL TIMEOUT INDIVIDUAL (Drop Silencioso)
+        // Comprobación del timeout individual (Drop Silencioso)
         const lastUserTime = userCooldowns[senderId] || 0;
         if (now - lastUserTime < cooldownTime) {
-            return; // 🛑 Ignoramos el mensaje si ESTE usuario aún está en tiempo de espera
+            return; 
         }
 
         try {
@@ -232,7 +229,6 @@ client.on('message_create', async (msg) => {
                 const randomMsg = davidMessages[Math.floor(Math.random() * davidMessages.length)];
                 await msg.reply(`📦 *Abriendo MM-Box...*\n✨ ¡Ha tocado sabiduría de David Falso!\n\n_"${randomMsg.body}"_`);
                 
-                // 2. ACTUALIZAMOS EL TIEMPO SOLO PARA ESTE USUARIO
                 userCooldowns[senderId] = Date.now();
             } else {
                 await msg.reply("😔 No he encontrado frases recientes de David Falso en mi memoria caché.");
@@ -250,14 +246,67 @@ client.on('message_create', async (msg) => {
     }
 
     // --- COMANDOS PRIVADOS (Solo Admins) ---
-    
+
+    if (text === '/getTimeout') {
+        const cooldown = config.davidFalsoCooldownSec !== undefined ? config.davidFalsoCooldownSec : 20;
+        await msg.reply(`⏱️ El cooldown individual actual de /davidFalso es de *${cooldown}* segundos.`);
+        return;
+    }
+
+    if (text.startsWith('/setTimeout ')) {
+        const args = text.split(' ');
+        const segs = parseInt(args[1], 10);
+        if (isNaN(segs) || segs < 0) {
+            await msg.reply("❌ Error: Especifica una cantidad de segundos válida y mayor o igual a 0.");
+            return;
+        }
+        
+        try {
+            const currentConfig = getConfig();
+            currentConfig.davidFalsoCooldownSec = segs;
+            fs.writeFileSync(configPath, JSON.stringify(currentConfig, null, 2));
+            await msg.reply(`✅ Cooldown de /davidFalso modificado dinámicamente a *${segs}* segundos.`);
+        } catch (err) {
+            console.error(err);
+            await msg.reply("❌ Error crítico escribiendo el nuevo valor en config.json.");
+        }
+        return;
+    }
+
+    if (text === '/version') {
+        try {
+            const gitDate = execSync('git log -1 --format="%cd" --date=format:"%d/%m/%Y %H:%M:%S"').toString().trim();
+            const gitHash = execSync('git log -1 --format="%h"').toString().trim();
+            
+            // Intentamos leer la última modificación de FETCH_HEAD (Último intento de sincronización del Cron)
+            let lastCheckDate = "Desconocida";
+            try {
+                const fetchHeadPath = path.join(__dirname, '.git', 'FETCH_HEAD');
+                if (fs.existsSync(fetchHeadPath)) {
+                    const stat = fs.statSync(fetchHeadPath);
+                    const d = stat.mtime;
+                    lastCheckDate = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+                }
+            } catch (err) {}
+
+            await msg.reply(`🤖 *BotCOMM - Estado del Sistema*\n\n🔄 *Última actualización aplicada:*\n📅 ${gitDate}\n🏷️ Commit: \`${gitHash}\`\n\n📡 *Último intento de sincronización (Cron):*\n⏱️ ${lastCheckDate}`);
+        } catch (e) {
+            const versionFallback = config.botVersion || "1.0.0";
+            await msg.reply(`🤖 *BotCOMM - Estado del Sistema*\n\n🏷️ Versión (Config): \`${versionFallback}\`\n_(No se pudo contactar con el motor de Git)_`);
+        }
+        return;
+    }
+
     if (text === '/info') {
         const infoMsg = `ℹ️ *SISTEMA MULTIMARZO - GUÍA DE USO*\n\n` +
-        `🛠️ *COMANDOS DE UTILIDAD:*\n` +
+        `🛠️ *COMANDOS DE UTILIDAD (Admins):*\n` +
         `🔹 */info* : Muestra este panel de ayuda.\n` +
-        `🔹 */ping* : Comprueba si el bot está en línea y responde.\n` +
-        `🔹 */version* : Muestra la fecha del último parche aplicado.\n` +
-        `🔹 */davidFalso* : (Público) Abre una caja sorpresa con sabiduría de David Falso.\n\n` +
+        `🔹 */ping* : Comprueba si el bot está en línea.\n` +
+        `🔹 */version* : Muestra la versión del bot y el último chequeo de Git.\n` +
+        `🔹 */getTimeout* : Consulta el cooldown asignado al easter egg.\n` +
+        `🔹 */setTimeout <segs>* : Modifica los segundos de cooldown en caliente.\n\n` +
+        `🎧 *COMANDOS PÚBLICOS:*\n` +
+        `🔹 */davidFalso* : Abre una caja sorpresa con sabiduría de David Falso.\n\n` +
         `🎧 *REGISTRO DE ESCUCHAS:*\n` +
         `Enviad las escuchas al grupo principal. El bot procesará al reaccionar con ☑️ o ✅.\n\n` +
         `*Obligatorio:*\n` +
@@ -272,21 +321,6 @@ client.on('message_create', async (msg) => {
 
     if (text === '/ping') {
         await msg.reply(`${PREFIX}pong`);
-    }
-
-    if (text === '/version') {
-        try {
-            // Ejecutamos el comando de git localmente para sacar fecha y hash
-            const gitDate = execSync('git log -1 --format="%cd" --date=format:"%d/%m/%Y %H:%M:%S"').toString().trim();
-            const gitHash = execSync('git log -1 --format="%h"').toString().trim();
-            
-            await msg.reply(`🤖 *BotCOMM - Estado del Sistema*\n\n🔄 *Última actualización:*\n📅 ${gitDate}\n🏷️ Commit: \`${gitHash}\``);
-        } catch (e) {
-            // Plan B: Si falla Git (ej: no está instalado o se borró la carpeta .git)
-            const versionFallback = config.botVersion || "Desconocida";
-            await msg.reply(`🤖 *BotCOMM - Estado del Sistema*\n\n🏷️ Versión (Config): \`${versionFallback}\`\n_(No se pudo contactar con el motor de Git)_`);
-        }
-        return;
     }
 });
 
@@ -621,9 +655,10 @@ client.on('message_reaction', async (reaction) => {
     
     const config = getConfig();
     const mainGroupId = config.mainGroupId;
+    const logGroupId = config.logGroupId;
 
-    // 1. FILTRO DE GRUPO: Ignorar si la reacción ocurre fuera del grupo de escuchas
-    if (mainGroupId && reaction.msgId.remote !== mainGroupId) {
+    // 🛑 FILTRO DE AISLAMIENTO ABSOLUTO: Ignorar si la reacción ocurre fuera del mainGroup o logGroup
+    if (reaction.msgId.remote !== mainGroupId && reaction.msgId.remote !== logGroupId) {
         return; 
     }
     
@@ -631,7 +666,6 @@ client.on('message_reaction', async (reaction) => {
     if (cleanEmoji !== '☑' && cleanEmoji !== '✅') return;
 
     const admins = config.admins || [];
-    
     if (!admins.includes(reaction.senderId)) return;
 
     let msg;
