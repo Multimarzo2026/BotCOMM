@@ -2,7 +2,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process'); // 👈 NUEVO: Necesario para leer Git
+const { execSync } = require('child_process'); 
 
 // ===== INICIALIZACIÓN BASE44 =====
 let base44;
@@ -38,6 +38,12 @@ function getWhitelist() {
         fs.writeFileSync(whitelistPath, JSON.stringify({ "34000000000@c.us": "ID_PARTICIPANTE_BASE44" }, null, 2));
     }
     return JSON.parse(fs.readFileSync(whitelistPath, 'utf8'));
+}
+
+// ===== NORMALIZADOR DE IDs DE WHATSAPP (MULTI-DEVICE) =====
+function normalizeWhatsAppId(id) {
+    if (!id) return "";
+    return id.replace(/:[0-9]+@/, '@');
 }
 
 // ===== EXTRACTOR DE ID ÚNICO =====
@@ -83,7 +89,7 @@ function getConfig() {
             mainGroupId: "",
             davidFalsoId: "",
             davidFalsoCooldownSec: 20,
-            botVersion: "1.0.0" // 👈 NUEVO: Plan B si Git no está disponible
+            botVersion: "1.0.0" 
         }, null, 2));
     }
     return JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -177,23 +183,20 @@ const userCooldowns = {};
 client.on('message_create', async (msg) => {
     const config = getConfig();
 
-    // 🛑 FILTRO DE AISLAMIENTO ABSOLUTO (Corregido)
-    // Comprobamos 'msg.from' (entrantes) y 'msg.to' (salientes, por si el bot y tú usáis el mismo número)
     const isMainGroup = msg.from === config.mainGroupId || msg.to === config.mainGroupId;
     const isLogGroup = msg.from === config.logGroupId || msg.to === config.logGroupId;
 
     if (!isMainGroup && !isLogGroup) {
-        return; // Drop silencioso absoluto si no es en BotCOMM o Logs
+        return; 
     }
 
     const text = msg.body.trim();
     const PREFIX = "`[ Multimarzo ]` "; 
     
-    // Obtenemos el ID real del usuario
-    const senderId = msg.author || msg.from; 
+    const rawSenderId = msg.author || msg.from; 
+    const senderId = normalizeWhatsAppId(rawSenderId); // Normalización aplicada
     const chat = await msg.getChat();
     
-    // --- ESPÍA SYSTEM RESTRINGIDO ---
     if (chat.isGroup) {
         const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
         console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
@@ -201,14 +204,12 @@ client.on('message_create', async (msg) => {
 
     if (!text.startsWith('/')) return;
 
-    // --- COMANDO EASTER EGG (Público con Cooldown Silencioso INDIVIDUAL) ---
     if (text === '/davidFalso') {
         const now = Date.now();
         
         const cooldownSec = config.davidFalsoCooldownSec !== undefined ? config.davidFalsoCooldownSec : 20;
         const cooldownTime = cooldownSec * 1000;
 
-        // Comprobación del timeout individual (Drop Silencioso)
         const lastUserTime = userCooldowns[senderId] || 0;
         if (now - lastUserTime < cooldownTime) {
             return; 
@@ -223,8 +224,9 @@ client.on('message_create', async (msg) => {
             const mainChat = await client.getChatById(config.mainGroupId);
             const messages = await mainChat.fetchMessages({ limit: 500 });
             
+            const targetId = normalizeWhatsAppId(config.davidFalsoId);
             const davidMessages = messages.filter(m => 
-                m.author === config.davidFalsoId && 
+                normalizeWhatsAppId(m.author) === targetId && 
                 m.body && 
                 m.body.trim().length > 0 && 
                 !m.hasMedia
@@ -244,13 +246,11 @@ client.on('message_create', async (msg) => {
         return;
     }
 
-    // --- FILTRO DE ADMINISTRADORES ---
-    const admins = config.admins || [];
+    // Filtramos administradores aplicando normalización en ambos lados
+    const admins = (config.admins || []).map(normalizeWhatsAppId);
     if (!admins.includes(senderId)) {
         return; 
     }
-
-    // --- COMANDOS PRIVADOS (Solo Admins) ---
 
     if (text === '/getTimeout') {
         const cooldown = config.davidFalsoCooldownSec !== undefined ? config.davidFalsoCooldownSec : 20;
@@ -283,7 +283,6 @@ client.on('message_create', async (msg) => {
             const gitDate = execSync('git log -1 --format="%cd" --date=format:"%d/%m/%Y %H:%M:%S"').toString().trim();
             const gitHash = execSync('git log -1 --format="%h"').toString().trim();
             
-            // Intentamos leer la última modificación de FETCH_HEAD (Último intento de sincronización del Cron)
             let lastCheckDate = "Desconocida";
             try {
                 const fetchHeadPath = path.join(__dirname, '.git', 'FETCH_HEAD');
@@ -345,7 +344,6 @@ async function fetchDiscMetadata(url, uniqueId) {
     };
     
     try {
-        // --- SPOTIFY ---
         if (uniqueId.startsWith('spotify_')) {
             const spotifyId = uniqueId.split('_')[1];
             
@@ -386,7 +384,6 @@ async function fetchDiscMetadata(url, uniqueId) {
             return { title, artist, year, type, trackCount, coverUrl, duration_minutes: totalMinutes, source: 'Spotify' };
         }
         
-        // --- YOUTUBE MUSIC ---
         if (uniqueId.startsWith('youtube_')) {
             const isPlaylist = uniqueId.startsWith('youtube_list_');
             const ytId = uniqueId.replace('youtube_list_', '').replace('youtube_video_', '');
@@ -662,7 +659,6 @@ client.on('message_reaction', async (reaction) => {
     const mainGroupId = config.mainGroupId;
     const logGroupId = config.logGroupId;
 
-    // 🛑 FILTRO DE AISLAMIENTO ABSOLUTO: Ignorar si la reacción ocurre fuera del mainGroup o logGroup
     if (reaction.msgId.remote !== mainGroupId && reaction.msgId.remote !== logGroupId) {
         return; 
     }
@@ -670,8 +666,9 @@ client.on('message_reaction', async (reaction) => {
     const cleanEmoji = reaction.reaction.replace(/[\uFE0F\u200D]/g, '');
     if (cleanEmoji !== '☑' && cleanEmoji !== '✅') return;
 
-    const admins = config.admins || [];
-    if (!admins.includes(reaction.senderId)) return;
+    const reactorId = normalizeWhatsAppId(reaction.senderId);
+    const admins = (config.admins || []).map(normalizeWhatsAppId);
+    if (!admins.includes(reactorId)) return;
 
     let msg;
     try {
@@ -681,7 +678,11 @@ client.on('message_reaction', async (reaction) => {
     }
 
     const text = msg.body.trim();
-    const senderId = msg.author || msg.from;
+    
+    // Normalizamos también el autor original del mensaje reaccionado
+    const rawSenderId = msg.author || msg.from;
+    const senderId = normalizeWhatsAppId(rawSenderId);
+    
     const logGroup = config.logGroupId;
     const PREFIX = "`[ Multimarzo BD ]` "; 
 
@@ -710,7 +711,12 @@ client.on('message_reaction', async (reaction) => {
         }
     };
 
-    const whitelist = getWhitelist();
+    // Cargamos y normalizamos la whitelist
+    const rawWhitelist = getWhitelist();
+    const whitelist = {};
+    for (const key in rawWhitelist) {
+        whitelist[normalizeWhatsAppId(key)] = rawWhitelist[key];
+    }
     const participantId = whitelist[senderId];
 
     if (!participantId) {
@@ -738,7 +744,6 @@ client.on('message_reaction', async (reaction) => {
         let participantName = "Desconocido";
         let participantRecord = null;
         try {
-            // Quitamos el 'const' para no sombrear la variable externa
             participantRecord = await base44.entities.Participant.get(participantId);
             if (participantRecord) participantName = participantRecord.name;
         } catch (e) {}
@@ -760,7 +765,6 @@ client.on('message_reaction', async (reaction) => {
         const rawDiscs = await base44.entities.Disc.list();
         const allDiscs = Array.isArray(rawDiscs) ? rawDiscs : (rawDiscs.data || rawDiscs.items || rawDiscs.records || []);
         
-        // 1. PRIMERA COMPROBACIÓN: Por URL exacta (ID único)
         let existingDisc = allDiscs.find(disc => {
             if (!disc.link) return false;
             return getUniqueId(disc.link) === userUniqueId;
@@ -779,19 +783,18 @@ client.on('message_reaction', async (reaction) => {
                 return;
             }
 
-            // 2. SEGUNDA COMPROBACIÓN: Por Título y Artista (Magia Unicode anti-duplicados)
             existingDisc = allDiscs.find(disc => {
                 if (!disc.title || !disc.artist) return false;
                 
                 const normalize = (str) => str.toLowerCase()
                     .replace(/\s*-\s*topic\s*$/i, '') 
-                    .replace(/[^\p{L}\p{N}\s]/gu, '') // Mantiene letras de cualquier idioma (Japonés, Ruso, etc) y números
+                    .replace(/[^\p{L}\p{N}\s]/gu, '') 
                     .replace(/\s+/g, '');             
                 
                 const dbTitle = normalize(disc.title);
                 const newTitle = normalize(metadata.title);
                 
-                if (!dbTitle || !newTitle) return false; // Blindaje contra strings vacíos
+                if (!dbTitle || !newTitle) return false; 
                 if (dbTitle !== newTitle) return false;
                 
                 const dbArtist = normalize(disc.artist);
@@ -864,22 +867,16 @@ client.on('message_reaction', async (reaction) => {
             listenPayload.listen_order = listenOrder;
         }
 
-        // 1. CREAMOS LA ESCUCHA Y GUARDAMOS SU ID
         const createdListen = await base44.entities.Listen.create(listenPayload);
 
-        // --- SISTEMA DE CRÉDITOS ---
-        let creditAwarded = 0; // Ahora guardará la cantidad dinámica en lugar de un booleano
+        let creditAwarded = 0; 
         let newCreditsBalance = 0;
 
-        // Comprobamos que no sea S/E y que hayamos podido obtener los datos del participante
         if (editionYear !== null && participantRecord) {
             let isAlive = true;
             const status = participantRecord.edition_status ? participantRecord.edition_status[editionYear] : 'En curso';
             const defeatOrder = participantRecord.edition_defeat_order ? participantRecord.edition_defeat_order[editionYear] : null;
 
-            // Lógica de "En Vivo": 
-            // - Si hay un orden de derrota fijado, comprobamos que la escucha actual sea anterior a ese número.
-            // - Si el estado es "Derrota" (pero no hay número) o "Inactivo", está fuera.
             if (defeatOrder && listenOrder >= defeatOrder) {
                 isAlive = false;
             } else if (status === 'Derrota' && !defeatOrder) {
@@ -889,8 +886,7 @@ client.on('message_reaction', async (reaction) => {
             }
 
             if (isAlive) {
-                // FETCH DINÁMICO DE CRÉDITOS DESDE AppConfig
-                let creditsToAward = 1; // Valor por defecto (salvavidas)
+                let creditsToAward = 1; 
                 
                 try {
                     const rawConfigs = await base44.entities.AppConfig.list();
@@ -904,16 +900,13 @@ client.on('message_reaction', async (reaction) => {
                     console.error("⚠️ No se pudo obtener 'credits_per_listen' de AppConfig. Usando 1 por defecto.", e);
                 }
 
-                // Si la recompensa es mayor a 0, procedemos con la transacción
                 if (creditsToAward > 0) {
                     newCreditsBalance = (participantRecord.credits || 0) + creditsToAward;
                     
-                    // Actualizamos el saldo en el perfil del participante
                     await base44.entities.Participant.update(participantId, {
                         credits: newCreditsBalance
                     });
 
-                    // Dejamos la huella en el registro de transacciones
                     await base44.entities.CreditTransaction.create({
                         participant_id: participantId,
                         amount: creditsToAward,
@@ -930,7 +923,6 @@ client.on('message_reaction', async (reaction) => {
             }
         }
 
-        // --- LÓGICA DE FORMATO DE FECHAS PARA EL LOG ---
         let dateFeedback;
         if (parsedData.isSE) {
             const msgDate = new Date(msg.timestamp * 1000);
@@ -962,7 +954,6 @@ client.on('message_reaction', async (reaction) => {
                          `💬 ${parsedData.comment}\n\n` +
                          `⭐ \`${parsedData.rating}/10\``;
 
-        // Añadimos un pequeño indicador visual al log si se han ganado créditos
         if (creditAwarded > 0) {
             finalLog += `\n\n> 🪙 +${creditAwarded} cr. (Total: ${newCreditsBalance})`;
         }
