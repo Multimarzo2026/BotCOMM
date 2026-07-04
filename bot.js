@@ -151,27 +151,37 @@ function parseUserMessage(text) {
     const fractionRegex = /\b\d+\s*\/\s*\d+(?:\s*\/\s*\d+)?(?:\s*\+\s*\d+)?\b/g;
     const fractions = text.match(fractionRegex);
     
+    let dateStringToRemove = "";
     if (fractions) {
         for (let f of fractions) {
             if (f.includes('+') || f.match(/\/\d{4}\b/) || f.match(/\/(28|29|30|31)\b/)) {
                 result.customDateLabel = f.trim();
+                dateStringToRemove = f; 
             }
         }
     }
 
     let cleanText = text;
     
+    // 1. Quitar enlaces, notas y fechas detectadas
     if (rawMatchedUrl) cleanText = cleanText.replace(rawMatchedUrl, '');
     if (ratingStringToRemove) cleanText = cleanText.replace(ratingStringToRemove, '');
-    
+    if (dateStringToRemove) cleanText = cleanText.replace(dateStringToRemove, '');
     cleanText = cleanText.replace(/\bS\/E(?:\s*:\s*\d+)?\b/ig, '');
     cleanText = cleanText.replace(/_:\s*\d+/g, '');
-    cleanText = cleanText.replace(/\b\d+\s*\/\s*\d+(?:\s*\/\s*\d+)?(?:\s*\+\s*\d+)?\b/g, ''); 
     
+    // 2. Limpiar símbolos y decoración ANTES de la escoba
     cleanText = cleanText.replace(/[📊📅💬⭐🔗`➤⊹★➯]/gu, '');
     cleanText = cleanText.replace(/[_*~]+/g, '');
-    cleanText = cleanText.replace(/[•*\-]?\s*abi[\w\s]*$/i, '');
+    cleanText = cleanText.replace(/[•*\-]?\s*abi[\w\s]*$/i, ''); // Firma específica
 
+    // 3. Limpiar espacios en blanco de líneas vacías para que las regex multilínea funcionen bien
+    cleanText = cleanText.replace(/^[ \t]+$/gm, '');
+
+    // 4. ESCOBA INTELIGENTE: Ahora sí atrapará el "190/372" porque el "➤" ya fue eliminado
+    cleanText = cleanText.replace(/^[ \t]*\d+\s*\/\s*\d+[ \t]*$/gm, '');
+
+    // 5. Reducir los saltos de línea múltiples a un máximo de dos
     result.comment = cleanText.trim().replace(/\n{3,}/g, '\n\n'); 
 
     return result;
@@ -655,6 +665,9 @@ async function fetchDiscMetadata(url, uniqueId) {
 // ===== REACTION HANDLER (El motor principal) =====
 client.on('message_reaction', async (reaction) => {
     
+    // 🔍 EL RADAR ABSOLUTO (Cualquier reacción en cualquier mensaje lo disparará)
+    console.log(`\n[📡 RADAR] Alguien ha reaccionado con '${reaction.reaction}' al mensaje: ${reaction.msgId._serialized}\n`);
+
     const config = getConfig();
     const mainGroupId = config.mainGroupId;
     const logGroupId = config.logGroupId;
@@ -664,16 +677,24 @@ client.on('message_reaction', async (reaction) => {
     }
     
     const cleanEmoji = reaction.reaction.replace(/[\uFE0F\u200D]/g, '');
-    if (cleanEmoji !== '☑' && cleanEmoji !== '✅') return;
+    if (cleanEmoji !== '☑' && cleanEmoji !== '✅') {
+        // No logueamos los emojis incorrectos para no hacer spam si la gente reacciona con un corazón
+        return;
+    }
 
     const reactorId = normalizeWhatsAppId(reaction.senderId);
     const admins = (config.admins || []).map(normalizeWhatsAppId);
-    if (!admins.includes(reactorId)) return;
+    
+    if (!admins.includes(reactorId)) {
+        console.log(`[⚠️ DIAGNÓSTICO] Reacción ignorada: El usuario que ha reaccionado (${reactorId}) NO está en la lista de admins de config.json.`);
+        return;
+    }
 
     let msg;
     try {
         msg = await client.getMessageById(reaction.msgId._serialized);
     } catch (e) {
+        console.log(`[⚠️ DIAGNÓSTICO CRÍTICO] El bot ha intentado leer el mensaje reaccionado pero WhatsApp Web no lo encuentra en su memoria caché. Esto ocurre con mensajes antiguos. Pide que lo reenvíen. (ID: ${reaction.msgId._serialized})`);
         return;
     }
 
@@ -720,6 +741,7 @@ client.on('message_reaction', async (reaction) => {
     const participantId = whitelist[senderId];
 
     if (!participantId) {
+        console.log(`[⚠️ DIAGNÓSTICO] Fallo de Whitelist para el ID: ${senderId}`);
         await updateLog(`${PREFIX}🚫 Bloqueado: El usuario origen (${senderId}) no está en la whitelist.`);
         return;
     }
