@@ -205,11 +205,18 @@ client.on('message_create', async (msg) => {
     
     const rawSenderId = msg.author || msg.from; 
     const senderId = normalizeWhatsAppId(rawSenderId); // Normalización aplicada
-    const chat = await msg.getChat();
     
-    if (chat.isGroup) {
-        const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
-        console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
+    // --- ESPÍA SYSTEM RESTRINGIDO CON PARACAÍDAS ANTI-CRASH ---
+    try {
+        const chat = await msg.getChat();
+        
+        if (chat.isGroup) {
+            const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
+            console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
+        }
+    } catch (err) {
+        // Ignoramos silenciosamente el error "r: r" de Puppeteer.
+        // Esto suele pasar con mensajes de sistema, encuestas o fallos de sincronización de WhatsApp.
     }
 
     if (!text.startsWith('/')) return;
@@ -317,6 +324,7 @@ client.on('message_create', async (msg) => {
         `🔹 */info* : Muestra este panel de ayuda.\n` +
         `🔹 */ping* : Comprueba si el bot está en línea.\n` +
         `🔹 */version* : Muestra la versión del bot y el último chequeo de Git.\n` +
+        `🔹 */whitelist* : Muestra la lista de usuarios autorizados.\n` +
         `🔹 */getTimeout* : Consulta el cooldown asignado al easter egg.\n` +
         `🔹 */setTimeout <segs>* : Modifica los segundos de cooldown en caliente.\n\n` +
         `🎧 *COMANDOS PÚBLICOS:*\n` +
@@ -330,6 +338,42 @@ client.on('message_create', async (msg) => {
         `💬 Reseña.`;
         
         await msg.reply(infoMsg);
+        return;
+    }
+
+    if (text === '/whitelist') {
+        try {
+            await msg.reply("⏳ Cruzando datos locales con Base44...");
+            
+            const rawWhitelist = getWhitelist();
+            // Filtramos las claves para ignorar las etiquetas manuales como "1.", "2."
+            const validWaIds = Object.keys(rawWhitelist).filter(key => key.includes('@'));
+            
+            if (validWaIds.length === 0) {
+                await msg.reply("📋 La whitelist está vacía o no tiene IDs válidos.");
+                return;
+            }
+
+            // Descargamos todos los participantes de Base44 en una sola llamada para no saturar la API
+            const rawParticipants = await base44.entities.Participant.list();
+            const allParticipants = Array.isArray(rawParticipants) ? rawParticipants : (rawParticipants.data || rawParticipants.items || rawParticipants.records || []);
+            
+            let message = `📋 *WHITELIST DE MULTIMARZO*\n\n`;
+            
+            for (const waId of validWaIds) {
+                const b44Id = rawWhitelist[waId];
+                const participant = allParticipants.find(p => p.id === b44Id);
+                const name = participant ? participant.name : "⚠️ Desconocido (ID de Base44 inválido)";
+                
+                message += `👤 *${name}*\n└ 📱 \`${waId}\`\n\n`;
+            }
+            
+            await msg.reply(message.trim());
+            
+        } catch (error) {
+            console.error("Error en /whitelist:", error);
+            await msg.reply("❌ Error conectando con Base44 para obtener los nombres.");
+        }
         return;
     }
 
