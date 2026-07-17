@@ -189,6 +189,8 @@ function parseUserMessage(text) {
 
 // ===== VARIABLES DE ESTADO =====
 const userCooldowns = {}; 
+const emergencyMessageCache = new Map(); // Cola local de mensajes
+const MAX_CACHE_SIZE = 100; // Guardaremos las últimas 100 reseñas detectadas
 
 client.on('message_create', async (msg) => {
     const config = getConfig();
@@ -214,9 +216,26 @@ client.on('message_create', async (msg) => {
             const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
             console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
         }
-    } catch (err) {
-        // Ignoramos silenciosamente el error "r: r" de Puppeteer.
-        // Esto suele pasar con mensajes de sistema, encuestas o fallos de sincronización de WhatsApp.
+    } catch (err) {}
+
+    // 📥 [NUEVO] INTERCEPTOR PARA LA MEMORIA DE EMERGENCIA
+    if (isMainGroup) {
+        const parsedTest = parseUserMessage(text);
+        // Si el mensaje parece una reseña (tiene enlace y nota), lo metemos en la cola
+        if (parsedTest.url && parsedTest.rating !== null) {
+            emergencyMessageCache.set(msg.id._serialized, {
+                body: text,
+                author: msg.author,
+                from: msg.from,
+                timestamp: msg.timestamp
+            });
+            
+            // Si la cola supera los 100, borramos el más antiguo (First In, First Out)
+            if (emergencyMessageCache.size > MAX_CACHE_SIZE) {
+                const oldestKey = emergencyMessageCache.keys().next().value;
+                emergencyMessageCache.delete(oldestKey);
+            }
+        }
     }
 
     if (!text.startsWith('/')) return;
@@ -736,10 +755,21 @@ client.on('message_reaction', async (reaction) => {
 
     let msg;
     try {
+        // 1. Intentamos obtenerlo de la memoria oficial de WhatsApp
         msg = await client.getMessageById(reaction.msgId._serialized);
     } catch (e) {
-        console.log(`[⚠️ DIAGNÓSTICO CRÍTICO] El bot ha intentado leer el mensaje reaccionado pero WhatsApp Web no lo encuentra en su memoria caché. Esto ocurre con mensajes antiguos. Pide que lo reenvíen. (ID: ${reaction.msgId._serialized})`);
-        return;
+        // 2. [FALLBACK] Lo buscamos en nuestra cola local de emergencia
+        if (emergencyMessageCache.has(reaction.msgId._serialized)) {
+            msg = emergencyMessageCache.get(reaction.msgId._serialized);
+            console.log(`[♻️ RESCATE] Mensaje recuperado exitosamente de la memoria de emergencia local.`);
+        } else {
+            // 3. [ALERTA VISUAL] Si falla en ambos sitios, avisamos por el grupo de logs
+            const PREFIX = "`[ Multimarzo BD ]` "; 
+            try {
+                await client.sendMessage(logGroupId, `${PREFIX}⚠️ *ALERTA DE CACHÉ MISTERIOSA*\nAlguien ha reaccionado a un mensaje, pero es tan antiguo (o el servidor se reinició) que ni la caché de WhatsApp ni mi memoria de emergencia lo encuentran.\n\n👉 *Solución:* Copiad la reseña, enviadla como un mensaje nuevo y volved a reaccionar.`);
+            } catch (err) {}
+            return;
+        }
     }
 
     const text = msg.body.trim();
