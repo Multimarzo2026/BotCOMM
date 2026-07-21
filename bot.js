@@ -134,13 +134,15 @@ function parseUserMessage(text) {
         result.url = normalizeUrl(rawMatchedUrl);
     }
 
-    const ratingRegex = /(\d+(?:[.,']\d+)?)\s*\/\s*10/g;
+    // 🐛 FIX: Expresión regular ultratolerante (acepta espacios raros, guiones y letras O en vez de ceros)
+    const ratingRegex = /(\d+(?:[.,']\s*\d+)?)\s*[\/∕-]\s*1[0oO]/gi;
     let ratingMatch;
     let lastRating = null;
     let ratingStringToRemove = ""; 
     
     while ((ratingMatch = ratingRegex.exec(text)) !== null) {
-        const cleanNumber = ratingMatch[1].replace(',', '.').replace("'", ".");
+        // Limpiamos todo lo que no sea número o decimal para el parseFloat
+        const cleanNumber = ratingMatch[1].replace(',', '.').replace("'", ".").replace(/\s+/g, '');
         lastRating = parseFloat(cleanNumber);
         ratingStringToRemove = ratingMatch[0];
     }
@@ -202,41 +204,37 @@ client.on('message_create', async (msg) => {
         return; 
     }
 
-    const text = msg.body.trim();
+    const text = msg.body ? msg.body.trim() : "";
     const PREFIX = "`[ Multimarzo ]` "; 
     
     const rawSenderId = msg.author || msg.from; 
-    const senderId = normalizeWhatsAppId(rawSenderId); // Normalización aplicada
+    const senderId = normalizeWhatsAppId(rawSenderId);
     
-    // --- ESPÍA SYSTEM RESTRINGIDO CON PARACAÍDAS ANTI-CRASH ---
-    try {
-        const chat = await msg.getChat();
-        
+    // 📥 [NUEVO] INTERCEPTOR ABSOLUTO MOVIDO AL PRINCIPIO
+    // Lo primero que hace el bot es guardar TODO, sin bloqueos.
+    if ((isMainGroup || isLogGroup) && text) {
+        try {
+            emergencyMessageCache.set(msg.id.id, msg);
+            emergencyMessageCache.set(msg.id._serialized, msg);
+            console.log(`[📥 CACHÉ LOCAL] Mensaje guardado en RAM (ID: ${msg.id.id})`);
+            
+            if (emergencyMessageCache.size > 200) { // Ampliado para dar más margen
+                const oldestKey = emergencyMessageCache.keys().next().value;
+                emergencyMessageCache.delete(oldestKey);
+            }
+        } catch (err) {
+            console.error("Error en interceptor:", err);
+        }
+    }
+
+    // --- ESPÍA SYSTEM RESTRINGIDO (SIN BLOQUEOS) ---
+    // Usamos .then() en lugar de await para que el bot NO se congele jamás
+    msg.getChat().then(chat => {
         if (chat.isGroup) {
             const groupLabel = isMainGroup ? "MAIN GROUP" : "LOG GROUP";
             console.log(`━━━━━━━━━ [ ESPÍA SYSTEM - ${groupLabel} ] ━━━━━━━━━\nGrupo: ${chat.name} | Usuario: ${senderId}\n\n${text}\n`);
         }
-    } catch (err) {}
-
-    // 📥 [NUEVO] INTERCEPTOR PARA LA MEMORIA DE EMERGENCIA
-    if (isMainGroup) {
-        const parsedTest = parseUserMessage(text);
-        // Si el mensaje parece una reseña (tiene enlace y nota), lo metemos en la cola
-        if (parsedTest.url && parsedTest.rating !== null) {
-            emergencyMessageCache.set(msg.id._serialized, {
-                body: text,
-                author: msg.author,
-                from: msg.from,
-                timestamp: msg.timestamp
-            });
-            
-            // Si la cola supera los 100, borramos el más antiguo (First In, First Out)
-            if (emergencyMessageCache.size > MAX_CACHE_SIZE) {
-                const oldestKey = emergencyMessageCache.keys().next().value;
-                emergencyMessageCache.delete(oldestKey);
-            }
-        }
-    }
+    }).catch(() => {});
 
     if (!text.startsWith('/')) return;
 
@@ -337,6 +335,248 @@ client.on('message_create', async (msg) => {
         return;
     }
 
+    // ===== COMANDO /upload <participante> <reseña> =====
+    if (text.startsWith('/upload')) {
+        const rawSenderId = msg.author || msg.from;
+        const senderId = normalizeWhatsAppId(rawSenderId);
+        const config = getConfig();
+        const admins = (config.admins || []).map(normalizeWhatsAppId);
+
+        if (!admins.includes(senderId)) {
+            await msg.reply("❌ No tienes permisos para ejecutar comandos de administración.");
+            return;
+        }
+
+        const match = text.match(/^\/upload\s+([^\s\n]+)[\s\n]+([\s\S]+)/i);
+
+        if (!match) {
+            await msg.reply("⚠️ *Uso correcto:*\n`/upload <participante> <reseña>`");
+            return;
+        }
+
+        const targetName = match[1].trim();
+        const reviewText = match[2].trim();
+        const PREFIX = "`[ Multimarzo BD ]` ";
+
+        await msg.reply(`${PREFIX}⏳ Procesando subida manual para *${targetName}*...`);
+
+        try {
+            // 1. Buscar participante
+            const rawParticipants = await base44.entities.Participant.list();
+            const allParticipants = Array.isArray(rawParticipants) ? rawParticipants : (rawParticipants.data || rawParticipants.items || rawParticipants.records || []);
+            const participantRecord = allParticipants.find(p => p.name.toLowerCase() === targetName.toLowerCase());
+
+            if (!participantRecord) {
+                await msg.reply(`${PREFIX}❌ No he encontrado a ningún participante llamado "*${targetName}*" en Base44.`);
+                return;
+            }
+            
+            const participantId = participantRecord.id;
+            const participantName = participantRecord.name;
+
+            // 2. Parsear reseña
+            const parsedData = parseUserMessage(reviewText);
+
+            if (!parsedData.url || parsedData.rating === null) {
+                await msg.reply(`${PREFIX}❌ Subida abortada. Faltan datos en el texto de la reseña (URL o Nota).`);
+                return;
+            }
+
+            const userUniqueId = getUniqueId(parsedData.url);
+            
+            // 3. Lógica Base44 (Extraída de tu motor principal)
+            const rawEditions = await base44.entities.Edition.list();
+            const allEditions = Array.isArray(rawEditions) ? rawEditions : (rawEditions.data || rawEditions.items || rawEditions.records || []);
+            
+            let currentEditionYear = new Date().getFullYear();
+            let currentEditionLimit = Infinity;
+
+            if (allEditions.length > 0) {
+                const currentEdition = allEditions.reduce((prev, current) => (prev.year > current.year) ? prev : current);
+                currentEditionYear = currentEdition.year;
+                currentEditionLimit = currentEdition.total_discs;
+            }
+
+            const editionYear = parsedData.isSE ? null : currentEditionYear;
+
+            const rawDiscs = await base44.entities.Disc.list();
+            const allDiscs = Array.isArray(rawDiscs) ? rawDiscs : (rawDiscs.data || rawDiscs.items || rawDiscs.records || []);
+            
+            let existingDisc = allDiscs.find(disc => {
+                if (!disc.link) return false;
+                return getUniqueId(disc.link) === userUniqueId;
+            });
+            
+            let discId;
+
+            if (existingDisc) {
+                discId = existingDisc.id;
+            } else {
+                await msg.reply(`${PREFIX}⏳ Verificando metadatos para evitar duplicados en otras plataformas...`);
+                
+                const metadata = await fetchDiscMetadata(parsedData.url, userUniqueId);
+                
+                if (!metadata) {
+                    await msg.reply(`${PREFIX}❌ Subida abortada.\nNo se pudieron extraer los metadatos de:\n🔗 ${parsedData.url}`);
+                    return;
+                }
+
+                existingDisc = allDiscs.find(disc => {
+                    if (!disc.title || !disc.artist) return false;
+                    const normalize = (str) => str.toLowerCase().replace(/\s*-\s*topic\s*$/i, '').replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, '');              
+                    
+                    const dbTitle = normalize(disc.title);
+                    const newTitle = normalize(metadata.title);
+                    if (!dbTitle || !newTitle) return false; 
+                    if (dbTitle !== newTitle) return false;
+                    
+                    const dbArtist = normalize(disc.artist);
+                    const newArtist = normalize(metadata.artist);
+                    const artistMatch = dbArtist.includes(newArtist) || newArtist.includes(dbArtist);
+                    
+                    const sameTracks = disc.track_count && metadata.trackCount && (disc.track_count === metadata.trackCount);
+                    const sameYear = disc.year && metadata.year && (Math.abs(disc.year - metadata.year) <= 1);
+                    
+                    return artistMatch || sameTracks || sameYear;
+                });
+
+                if (existingDisc) {
+                    discId = existingDisc.id;
+                } else {
+                    const newDiscPayload = {
+                        title: metadata.title,
+                        artist: metadata.artist,
+                        year: metadata.year,
+                        type: metadata.type,
+                        duration_minutes: metadata.duration_minutes, 
+                        track_count: metadata.trackCount,
+                        cover_url: metadata.coverUrl, 
+                        link: parsedData.url,
+                        source: metadata.source 
+                    };
+                    const createdDisc = await base44.entities.Disc.create(newDiscPayload);
+                    discId = createdDisc.id;
+                }
+            }
+
+            let listenOrder = null;
+            if (editionYear !== null) {
+                const rawListens = await base44.entities.Listen.list();
+                const allListens = Array.isArray(rawListens) ? rawListens : (rawListens.data || rawListens.items || rawListens.records || []);
+                
+                const userEditionListens = allListens.filter(l => l.participant_id === participantId && l.edition_year === editionYear);
+                listenOrder = userEditionListens.length + 1;
+
+                if (listenOrder > currentEditionLimit) {
+                    await msg.reply(`${PREFIX}❌ Límite alcanzado.\n${participantName} ya ha completado los ${currentEditionLimit} discos de la edición.`);
+                    return;
+                }
+            }
+
+            const messageDate = new Date(); 
+
+            const listenPayload = {
+                participant_id: participantId,
+                disc_id: discId,
+                edition_year: editionYear,
+                rating: parsedData.rating,
+                comment: parsedData.comment,
+                listen_date: messageDate.toISOString() 
+            };
+
+            if (listenOrder !== null) {
+                listenPayload.listen_order = listenOrder;
+            }
+
+            const createdListen = await base44.entities.Listen.create(listenPayload);
+
+            let creditAwarded = 0; 
+            let newCreditsBalance = participantRecord.credits || 0;
+
+            if (editionYear !== null && participantRecord) {
+                let isAlive = true;
+                const status = participantRecord.edition_status ? participantRecord.edition_status[editionYear] : 'En curso';
+                const defeatOrder = participantRecord.edition_defeat_order ? participantRecord.edition_defeat_order[editionYear] : null;
+
+                if (defeatOrder && listenOrder >= defeatOrder) {
+                    isAlive = false;
+                } else if (status === 'Derrota' && !defeatOrder) {
+                    isAlive = false;
+                } else if (status === 'Inactivo') {
+                    isAlive = false;
+                }
+
+                if (isAlive) {
+                    let creditsToAward = 1; 
+                    try {
+                        const rawConfigs = await base44.entities.AppConfig.list();
+                        const allConfigs = Array.isArray(rawConfigs) ? rawConfigs : (rawConfigs.data || rawConfigs.items || rawConfigs.records || []);
+                        const creditConfig = allConfigs.find(c => c.key === 'credits_per_listen');
+                        if (creditConfig && typeof creditConfig.value === 'number') {
+                            creditsToAward = creditConfig.value;
+                        }
+                    } catch (e) {}
+
+                    if (creditsToAward > 0) {
+                        newCreditsBalance += creditsToAward;
+                        await base44.entities.Participant.update(participantId, { credits: newCreditsBalance });
+
+                        await base44.entities.CreditTransaction.create({
+                            participant_id: participantId,
+                            amount: creditsToAward,
+                            balance_after: newCreditsBalance,
+                            type: "listen_reward",
+                            description: `Recompensa por escucha #${listenOrder} (Edición ${editionYear}) [Manual]`,
+                            related_listen_id: createdListen.id,
+                            related_disc_id: discId,
+                            transaction_date: messageDate.toISOString()
+                        });
+                        creditAwarded = creditsToAward;
+                    }
+                }
+            }
+
+            let dateFeedback;
+            if (parsedData.isSE) {
+                const d = messageDate.getDate().toString().padStart(2, '0');
+                const m = (messageDate.getMonth() + 1).toString().padStart(2, '0');
+                const y = messageDate.getFullYear();
+                dateFeedback = `${d}/${m}/${y}`;
+            } else {
+                dateFeedback = parsedData.customDateLabel;
+                if (!dateFeedback) {
+                    const d = messageDate.getDate();
+                    const mDays = new Date(messageDate.getFullYear(), messageDate.getMonth() + 1, 0).getDate();
+                    dateFeedback = `${d}/${mDays}`;
+                }
+            }
+            if (dateFeedback && dateFeedback.includes('+')) {
+                dateFeedback = dateFeedback.replace(/\s*\+\s*/g, ' +');
+            }
+
+            const orderText = parsedData.isSE ? 'S/E' : `${listenOrder}/${currentEditionLimit}`;
+
+            let finalLog = `${PREFIX}✅ ¡Escucha subida manualmente con éxito!\n\n` +
+                           `👤 *${participantName}*\n` +
+                           `🔗 ${parsedData.url}\n\n` +
+                           `📊 \`${orderText}\`\n` +
+                           `📅 \`${dateFeedback}\`\n\n` +
+                           `💬 ${parsedData.comment}\n\n` +
+                           `⭐ \`${parsedData.rating}/10\``;
+
+            if (creditAwarded > 0) {
+                finalLog += `\n\n> 🪙 +${creditAwarded} cr. (Total: ${newCreditsBalance})`;
+            }
+
+            await msg.reply(finalLog);
+
+        } catch (error) {
+            console.error("Error en /upload:", error);
+            await msg.reply(`${PREFIX}💥 Error crítico procesando la subida manual: ${error.message || error}`);
+        }
+        return; 
+    }
+
     if (text === '/info') {
         const infoMsg = `ℹ️ *SISTEMA MULTIMARZO - GUÍA DE USO*\n\n` +
         `🛠️ *COMANDOS DE UTILIDAD (Admins):*\n` +
@@ -344,6 +584,7 @@ client.on('message_create', async (msg) => {
         `🔹 */ping* : Comprueba si el bot está en línea.\n` +
         `🔹 */version* : Muestra la versión del bot y el último chequeo de Git.\n` +
         `🔹 */whitelist* : Muestra la lista de usuarios autorizados.\n` +
+        `🔹 */upload <nombre> <reseña>* : Sube una escucha a Base44 reasignada a un participante.\n` +
         `🔹 */getTimeout* : Consulta el cooldown asignado al easter egg.\n` +
         `🔹 */setTimeout <segs>* : Modifica los segundos de cooldown en caliente.\n\n` +
         `🎧 *COMANDOS PÚBLICOS:*\n` +
@@ -728,8 +969,9 @@ async function fetchDiscMetadata(url, uniqueId) {
 // ===== REACTION HANDLER (El motor principal) =====
 client.on('message_reaction', async (reaction) => {
     
-    // 🔍 EL RADAR ABSOLUTO (Cualquier reacción en cualquier mensaje lo disparará)
-    console.log(`\n[📡 RADAR] Alguien ha reaccionado con '${reaction.reaction}' al mensaje: ${reaction.msgId._serialized}\n`);
+    if (!reaction || !reaction.msgId) {
+        return;
+    }
 
     const config = getConfig();
     const mainGroupId = config.mainGroupId;
@@ -740,39 +982,66 @@ client.on('message_reaction', async (reaction) => {
     }
     
     const cleanEmoji = reaction.reaction.replace(/[\uFE0F\u200D]/g, '');
-    if (cleanEmoji !== '☑' && cleanEmoji !== '✅') {
-        // No logueamos los emojis incorrectos para no hacer spam si la gente reacciona con un corazón
-        return;
-    }
+    if (cleanEmoji !== '☑' && cleanEmoji !== '✅') return;
 
     const reactorId = normalizeWhatsAppId(reaction.senderId);
     const admins = (config.admins || []).map(normalizeWhatsAppId);
     
     if (!admins.includes(reactorId)) {
-        console.log(`[⚠️ DIAGNÓSTICO] Reacción ignorada: El usuario que ha reaccionado (${reactorId}) NO está en la lista de admins de config.json.`);
         return;
     }
 
     let msg;
+    const targetId = reaction.msgId.id; 
+    const targetSerialized = reaction.msgId._serialized;
+
     try {
-        // 1. Intentamos obtenerlo de la memoria oficial de WhatsApp
-        msg = await client.getMessageById(reaction.msgId._serialized);
+        // 1. WhatsApp Oficial Rápido
+        msg = await client.getMessageById(targetSerialized);
+        if (!msg) throw new Error("Mensaje undefined"); 
+        
+        // 🚨 EL ESCUDO CONTRA LA LOCURA DE WWebJS 🚨
+        if (msg.id.id !== targetId) {
+            console.log(`[⚠️ ALUCINACIÓN WWebJS] Pedí el ID ${targetId} pero me dio el ${msg.id.id}. Forzando rescate...`);
+            throw new Error("WWebJS devolvió el mensaje incorrecto");
+        }
+        
     } catch (e) {
-        // 2. [FALLBACK] Lo buscamos en nuestra cola local de emergencia
-        if (emergencyMessageCache.has(reaction.msgId._serialized)) {
-            msg = emergencyMessageCache.get(reaction.msgId._serialized);
-            console.log(`[♻️ RESCATE] Mensaje recuperado exitosamente de la memoria de emergencia local.`);
+        // 2. Caché Local Inmediata (Busca por las dos claves)
+        if (emergencyMessageCache.has(targetId)) {
+            msg = emergencyMessageCache.get(targetId);
+            console.log(`[♻️ RESCATE LOCAL ÉPICO] Mensaje recuperado por ID puro: ${targetId}`);
+        } else if (emergencyMessageCache.has(targetSerialized)) {
+            msg = emergencyMessageCache.get(targetSerialized);
+            console.log(`[♻️ RESCATE LOCAL ÉPICO] Mensaje recuperado por ID serializado: ${targetSerialized}`);
         } else {
-            // 3. [ALERTA VISUAL] Si falla en ambos sitios, avisamos por el grupo de logs
-            const PREFIX = "`[ Multimarzo BD ]` "; 
+            // 3. Fallback a Historial
+            console.log(`[📡 BÚSQUEDA ACTIVA] Buscando código: ${targetId}`);
+            
             try {
-                await client.sendMessage(logGroupId, `${PREFIX}⚠️ *ALERTA DE CACHÉ MISTERIOSA*\nAlguien ha reaccionado a un mensaje, pero es tan antiguo (o el servidor se reinició) que ni la caché de WhatsApp ni mi memoria de emergencia lo encuentran.\n\n👉 *Solución:* Copiad la reseña, enviadla como un mensaje nuevo y volved a reaccionar.`);
-            } catch (err) {}
-            return;
+                const chatToFetch = await client.getChatById(reaction.msgId.remote);
+                const history = await chatToFetch.fetchMessages({ limit: 100 });
+                const foundMsg = history.find(m => m.id.id === targetId);
+                
+                if (foundMsg) {
+                    msg = foundMsg;
+                    console.log(`[✅ RESCATE ÉPICO] Mensaje encontrado exitosamente en el historial.`);
+                } else {
+                    throw new Error("No está en el historial bajado");
+                }
+            } catch (fetchErr) {
+                console.error("\n[🚨 ERROR EN DESCARGA DE HISTORIAL]:", fetchErr.message || fetchErr, "\n");
+                const PREFIX = "`[ Multimarzo BD ]` "; 
+                try {
+                    await client.sendMessage(logGroupId, `${PREFIX}⚠️ *ALERTA CRÍTICA*\nNo puedo leer esta reseña por un error de sincronización. Por favor, copiad el texto, enviadlo como un mensaje NUEVO e intentad reaccionar al nuevo.`);
+                } catch (err) {}
+                return;
+            }
         }
     }
 
-    const text = msg.body.trim();
+    const text = msg.body ? msg.body.trim() : "";
+    if (!text) return; // Abortamos si no hay texto extraíble
     
     // Normalizamos también el autor original del mensaje reaccionado
     const rawSenderId = msg.author || msg.from;
@@ -824,8 +1093,12 @@ client.on('message_reaction', async (reaction) => {
 
     const parsedData = parseUserMessage(text);
 
+    // 🐛 DIAGNÓSTICO VISUAL EXACTO PARA REACCIONES
     if (!parsedData.url || parsedData.rating === null) {
-        await updateLog(`${PREFIX}❌ Reacción abortada. Faltan datos (Enlace o Nota X/10) en el mensaje.`);
+        const debugUrl = parsedData.url ? '✅ Detectada' : '❌ Falla';
+        const debugRating = parsedData.rating !== null ? `✅ Detectada (${parsedData.rating}/10)` : '❌ Falla';
+        
+        await updateLog(`${PREFIX}❌ Reacción abortada. Faltan datos en el mensaje.\n\n🔍 *Diagnóstico Forense:*\n🔗 URL: ${debugUrl}\n⭐ Nota: ${debugRating}\n\nLa reseña es:\n${text}`);
         return;
     }
 
